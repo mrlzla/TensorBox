@@ -53,7 +53,7 @@ def get_results(args, H):
         
             pred_anno.rects = rects
             pred_anno.imagePath = os.path.abspath(data_dir)
-            pred_anno = rescale_boxes((H["image_height"], H["image_width"]), pred_anno, orig_img.shape[0], orig_img.shape[1])
+            pred_anno = rescale_boxes((H["image_height"], H["image_width"]), pred_anno, orig_img.shape[0], orig_img.shape[1], test=True)
             pred_annolist.append(pred_anno)
             
             imname = '%s/%s' % (image_dir, os.path.basename(true_anno.imageName))

@@ -12,14 +12,22 @@ from utils.annolist import AnnotationLib as al
 from rect import Rect
 from utils import tf_concat
 
-def rescale_boxes(current_shape, anno, target_height, target_width):
+def rescale_boxes(current_shape, anno, target_height, target_width, test=False):
     x_scale = target_width / float(current_shape[1])
     y_scale = target_height / float(current_shape[0])
     for r in anno.rects:
-        assert r.x1 < r.x2 # one of the annotations has negative width!
+        if r.x1 >= r.x2:
+            if test:
+                r.x1, r.x2 = r.x2, r.x1
+            else:   
+                assert r.x1 < r.x2
         r.x1 *= x_scale
         r.x2 *= x_scale
-        assert r.y1 < r.y2 # one of the annotations has negative height!
+        if r.y1 >= r.y2:
+            if test:
+                r.y1, r.y2 = r.y2, r.y1
+            else:   
+                assert r.y1 < r.y2
         r.y1 *= y_scale
         r.y2 *= y_scale
     return anno
