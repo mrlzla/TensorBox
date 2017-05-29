@@ -28,31 +28,6 @@ np.random.seed(0)
 
 from utils import train_utils, googlenet_load, tf_concat
 
-@ops.RegisterGradient("Hungarian")
-def _hungarian_grad(op, *args):
-    return map(array_ops.zeros_like, op.inputs)
-
-def build_lstm_inner(H, lstm_input):
-    '''
-    build lstm decoder
-    '''
-    lstm_cell = rnn_cell.BasicLSTMCell(H['lstm_size'], forget_bias=0.0, state_is_tuple=True)
-    if H['num_lstm_layers'] > 1:
-        lstm = rnn_cell.MultiRNNCell([lstm_cell] * H['num_lstm_layers'], state_is_tuple=True)
-    else:
-        lstm = lstm_cell
-
-    batch_size = H['batch_size'] * H['grid_height'] * H['grid_width']
-    state = lstm.zero_state(batch_size, tf.float32)
-
-    outputs = []
-    with tf.variable_scope('RNN', initializer=tf.random_uniform_initializer(-0.1, 0.1)):
-        for time_step in range(H['rnn_len']):
-            if time_step > 0: tf.get_variable_scope().reuse_variables()
-            output, state = lstm(lstm_input, state)
-            outputs.append(output)
-    return outputs
-
 def build_overfeat_inner(H, lstm_input):
     '''
     build simple overfeat decoder
