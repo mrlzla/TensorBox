@@ -97,6 +97,48 @@ def get_results(args, H, data_dir):
                 print(i)
     return pred_annolist
 
+
+def video_results(args, H, filepath):
+    tf.reset_default_graph()
+    if args.frozen_graph:
+        graph = load_frozen_graph(args.graphfile)
+    else:
+        new_saver = tf.train.import_meta_graph(args.graphfile)
+    NUM_THREADS = 8
+    with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS),
+            graph=graph if args.frozen_graph else None) as sess:
+        sess.run(tf.global_variables_initializer())
+        if args.frozen_graph:
+            x_in = graph.get_tensor_by_name('x_in:0')
+            pred_boxes = graph.get_tensor_by_name('add:0')
+            pred_confidences = graph.get_tensor_by_name('Reshape_2:0')
+        else:
+            new_saver.restore(sess, args.weights)
+            x_in = tf.get_collection('placeholders')[0]
+            pred_boxes, pred_confidences = tf.get_collection('vars')
+        #import ipdb; ipdb.set_trace()args
+        cap = cv2.VideoCapture("./IMG_2764.MOV")
+        while not cap.isOpened():
+            cap = cv2.VideoCapture("./IMG_2764.MOV")
+            cv2.waitKey(0)
+            print "Wait for the header"
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter('output.avi',fourcc, 20.0, (640,480))
+        while(True):
+            ret, frame = cap.read()
+            feed = {x_in: frame}
+            start_time = time()
+            (np_pred_boxes, np_pred_confidences) = sess.run([pred_boxes, pred_confidences], feed_dict=feed)
+            time_2 = time()
+            new_img, rects = add_rectangles(H, [img], np_pred_confidences, np_pred_boxes,
+                                use_stitching=True, rnn_len=H['rnn_len'], min_conf=args.min_conf, tau=args.tau, show_suppressed=args.show_suppressed)
+            print(time() - start_time)
+            out.write(new_img)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', required=False)
@@ -116,5 +158,7 @@ if __name__ == '__main__':
     with open(hypes_file, 'r') as f:
         H = json.load(f)
     expname = '_' + args.expname  if args.expname else ''
- 
-    pred_annolist = get_results(args, H, os.path.dirname(args.datadir))
+    
+    video_results(args, H, os.path.dirname(args.datadir))
+
+    #pred_annolist = get_results(args, H, os.path.dirname(args.datadir))

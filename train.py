@@ -15,6 +15,7 @@ import numpy as np
 from distutils.version import LooseVersion
 if LooseVersion(tf.__version__) >= LooseVersion('1.0'):
     rnn_cell = tf.contrib.rnn
+    DropoutWrapper = tf.contrib.rnn.DropoutWrapper 
 else:
     try:
         from tensorflow.models.rnn import rnn_cell
@@ -32,16 +33,29 @@ from utils import train_utils, googlenet_load, tf_concat
 def _hungarian_grad(op, *args):
     return map(array_ops.zeros_like, op.inputs)
 
-def build_lstm_inner(H, lstm_input):
+def lstm_cell(H, use_dropout=True):
+    '''
+    build lstm cell
+    '''
+
+    def get_lstm(use_dropout=True):
+        lstm = rnn_cell.BasicLSTMCell(H['lstm_size'], forget_bias=0.0, state_is_tuple=True)
+        if use_dropout:
+            lstm = DropoutWrapper(lstm, output_keep_prob=0.5)
+        return lstm
+
+    if H['num_lstm_layers'] > 1:
+        lstm = rnn_cell.MultiRNNCell([get_lstm(use_dropout) for _ in range(H['num_lstm_layers'])], state_is_tuple=True)
+    else:
+        lstm = get_lstm(use_dropout)
+    return lstm
+    
+
+def build_lstm_inner(H, lstm_input, phase):
     '''
     build lstm decoder
     '''
-    lstm_cell = rnn_cell.BasicLSTMCell(H['lstm_size'], forget_bias=0.0, state_is_tuple=True)
-    if H['num_lstm_layers'] > 1:
-        lstm = rnn_cell.MultiRNNCell([lstm_cell] * H['num_lstm_layers'], state_is_tuple=True)
-    else:
-        lstm = lstm_cell
-
+    lstm = lstm_cell(H, use_dropout = (phase == 'train'))
     batch_size = H['batch_size'] * H['grid_height'] * H['grid_width']
     state = lstm.zero_state(batch_size, tf.float32)
 
@@ -53,7 +67,7 @@ def build_lstm_inner(H, lstm_input):
             outputs.append(output)
     return outputs
 
-def build_overfeat_inner(H, lstm_input):
+def build_overfeat_inner(H, lstm_input, phase):
     '''
     build simple overfeat decoder
     '''
@@ -157,25 +171,22 @@ def build_forward(H, x, phase, reuse):
                      [H['batch_size'] * H['grid_width'] * H['grid_height'], H['later_feat_channels']])
     initializer = tf.random_uniform_initializer(-0.1, 0.1)
     with tf.variable_scope('decoder', reuse=reuse, initializer=initializer):
-        scale_down = 0.01
-        lstm_input = tf.reshape(cnn * scale_down, (H['batch_size'] * grid_size, H['later_feat_channels']))
+        lstm_input = tf.reshape(cnn, (H['batch_size'] * grid_size, H['later_feat_channels']))
         if H['use_lstm']:
-            lstm_outputs = build_lstm_inner(H, lstm_input)
+            lstm_outputs = build_lstm_inner(H, lstm_input, phase)
         else:
-            lstm_outputs = build_overfeat_inner(H, lstm_input)
+            lstm_outputs = build_overfeat_inner(H, lstm_input, phase)
 
         pred_boxes = []
         pred_logits = []
         for k in range(H['rnn_len']):
             output = lstm_outputs[k]
-            if phase == 'train':
-                output = tf.nn.dropout(output, 0.5)
             box_weights = tf.get_variable('box_ip%d' % k,
                                           shape=(H['lstm_size'], 4))
             conf_weights = tf.get_variable('conf_ip%d' % k,
                                            shape=(H['lstm_size'], H['num_classes']))
 
-            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights) * 50,
+            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights),
                                          [outer_size, 1, 4])
 
             pred_boxes.append(pred_boxes_step)
@@ -412,7 +423,7 @@ def train(H, test_images):
     '''
     Setup computation graph, run 2 prefetch data threads, and then run the main loop
     '''
-
+    #import ipdb; ipdb.set_trace()
     if not os.path.exists(H['save_dir']): os.makedirs(H['save_dir'])
 
     ckpt_file = H['save_dir'] + '/save.ckpt'
