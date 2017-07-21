@@ -117,16 +117,20 @@ def video_results(args, H, filepath):
             x_in = tf.get_collection('placeholders')[0]
             pred_boxes, pred_confidences = tf.get_collection('vars')
         #import ipdb; ipdb.set_trace()args
-        cap = cv2.VideoCapture("./IMG_2764.MOV")
-        while not cap.isOpened():
-            cap = cv2.VideoCapture("./IMG_2764.MOV")
-            cv2.waitKey(0)
-            print "Wait for the header"
+        cap = cv2.VideoCapture(args.datadir)
+        print(cap.isOpened())
+        #while not cap.isOpened():
+            #cap = cv2.VideoCapture("./IMG_2764.MOV")
+        
+            #print "Wait for the header"
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         out = cv2.VideoWriter('output.avi',fourcc, 20.0, (640,480))
-        while(True):
+        while(cap.isOpened()):
             ret, frame = cap.read()
-            feed = {x_in: frame}
+            if not ret:
+                break
+            img = imresize(frame, (H["image_height"], H["image_width"]), interp='cubic')
+            feed = {x_in: img}
             start_time = time()
             (np_pred_boxes, np_pred_confidences) = sess.run([pred_boxes, pred_confidences], feed_dict=feed)
             time_2 = time()

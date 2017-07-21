@@ -37,7 +37,7 @@ def lstm_cell(H, use_dropout=True):
     '''
     build lstm cell
     '''
-
+    
     def get_lstm(use_dropout=True):
         lstm = rnn_cell.BasicLSTMCell(H['lstm_size'], forget_bias=0.0, state_is_tuple=True)
         if use_dropout:
@@ -171,7 +171,8 @@ def build_forward(H, x, phase, reuse):
                      [H['batch_size'] * H['grid_width'] * H['grid_height'], H['later_feat_channels']])
     initializer = tf.random_uniform_initializer(-0.1, 0.1)
     with tf.variable_scope('decoder', reuse=reuse, initializer=initializer):
-        lstm_input = tf.reshape(cnn, (H['batch_size'] * grid_size, H['later_feat_channels']))
+        scale_down = 0.01
+        lstm_input = tf.reshape(cnn * scale_down, (H['batch_size'] * grid_size, H['later_feat_channels']))
         if H['use_lstm']:
             lstm_outputs = build_lstm_inner(H, lstm_input, phase)
         else:
@@ -186,7 +187,7 @@ def build_forward(H, x, phase, reuse):
             conf_weights = tf.get_variable('conf_ip%d' % k,
                                            shape=(H['lstm_size'], H['num_classes']))
 
-            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights),
+            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights) * 50,
                                          [outer_size, 1, 4])
 
             pred_boxes.append(pred_boxes_step)
@@ -207,11 +208,12 @@ def build_forward(H, x, phase, reuse):
             w_offsets = H['rezoom_w_coords']
             h_offsets = H['rezoom_h_coords']
             num_offsets = len(w_offsets) * len(h_offsets)
+            #import ipdb; ipdb.set_trace()
             rezoom_features = rezoom(H, pred_boxes, early_feat, early_feat_channels, w_offsets, h_offsets)
             if phase == 'train':
                 rezoom_features = tf.nn.dropout(rezoom_features, 0.5)
             for k in range(H['rnn_len']):
-                delta_features = tf_concat(1, [lstm_outputs[k], rezoom_features[:, k, :] / 1000.])
+                delta_features = tf_concat(1, [lstm_outputs[k], rezoom_features[:, k, :] / 1000.0])
                 dim = 128
                 delta_weights1 = tf.get_variable(
                                     'delta_ip1%d' % k,
