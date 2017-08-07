@@ -1,7 +1,7 @@
 {
     "data": {
-        "train_idl": "./people_train_data_fixed_4.json",
-        "test_idl": "./people_val_data_v2.json",
+        "train_idl": "./traffic_lights_train_data_v2.json",
+        "test_idl": "./traffic_lights_val_data_v2.json",
         "truncate_data": false
     },
     "logging": {
@@ -46,6 +46,6 @@
     "deconv": false,
     "num_classes": 2,
     "rnn_len": 5,
-    "grayscale": true,
+    "grayscale": false,
     "grayscale_prob": 0.8
 }

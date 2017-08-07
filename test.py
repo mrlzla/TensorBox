@@ -47,7 +47,7 @@ def get_results(args, H, data_dir):
         graph = load_frozen_graph(args.graphfile)
     else:
         new_saver = tf.train.import_meta_graph(args.graphfile)
-    NUM_THREADS = 8
+    NUM_THREADS = 1
     with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS),
             graph=graph if args.frozen_graph else None) as sess:
         sess.run(tf.global_variables_initializer())
@@ -158,7 +158,7 @@ if __name__ == '__main__':
     parser.add_argument('--frozen_graph', default=False, type=bool)
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    hypes_file = '%s/hypes.json' % os.path.dirname(args.weights) if args.weights else "hypes/lstm_resnet_rezoom.json"
+    hypes_file = '%s/hypes.json' % os.path.dirname(args.weights) if args.weights else "hypes/lstm_rezoom.json"
     with open(hypes_file, 'r') as f:
         H = json.load(f)
     expname = '_' + args.expname  if args.expname else ''

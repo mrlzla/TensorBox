@@ -178,7 +178,7 @@ def annotation_jitter(I, a_in, min_box_width=20, jitter_scale_min=0.9, jitter_sc
 
     return I2, a
 
-def convert_sloth(filename):
+def convert_sloth(filename, save=True, output_name='annotations.json'):
     with open(filename) as f:
       annos = json.load(f)
     new_annos = [
@@ -194,8 +194,11 @@ def convert_sloth(filename):
           ]
         } for anno in annos
     ]
-    with open("{}/{}".format(os.path.dirname(filename), "annotations.json"), 'w') as f:
-        json.dump(new_annos, f)
+    if save: 
+        with open("{}/{}".format(os.path.dirname(filename), output_name), 'w') as f:
+            json.dump(new_annos, f)
+    else:
+        return new_annos
 
 def convert_to_sloth(filename):
     with open(filename) as f:
@@ -409,7 +412,7 @@ def convert_hollywood(phase, datadir):
         json.dump(annos, f)
 
 
-def merge_annotations(output_name, *files):
+def merge_annotations(files, save=True, output_name=''):
     res = []
     for json_anno in files:
         with open(json_anno) as f:
@@ -417,5 +420,8 @@ def merge_annotations(output_name, *files):
             res += anno
     import random
     random.shuffle(res)
-    with open(output_name, 'w') as f:
-        json.dump(res, f)
+    if save:
+        with open(output_name, 'w') as f:
+            json.dump(res, f)
+    else:
+        return res
