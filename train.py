@@ -15,7 +15,8 @@ import numpy as np
 from distutils.version import LooseVersion
 if LooseVersion(tf.__version__) >= LooseVersion('1.0'):
     rnn_cell = tf.contrib.rnn
-    DropoutWrapper = tf.contrib.rnn.DropoutWrapper 
+    DropoutWrapper = tf.contrib.rnn.DropoutWrapper
+    ResidualWrapper = tf.contrib.rnn.DropoutWrapper
 else:
     try:
         from tensorflow.models.rnn import rnn_cell
@@ -23,6 +24,9 @@ else:
         rnn_cell = tf.nn.rnn_cell
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.util import nest
+from tensorflow.python.framework import tensor_shape
+from beholder.beholder import Beholder
 
 random.seed(0)
 np.random.seed(0)
@@ -33,6 +37,78 @@ from utils import train_utils, googlenet_load, tf_concat
 def _hungarian_grad(op, *args):
     return map(array_ops.zeros_like, op.inputs)
 
+def _state_size_with_prefix(state_size, prefix=None):
+  """Helper function that enables int or TensorShape shape specification.
+ 
+  This function takes a size specification, which can be an integer or a
+  TensorShape, and converts it into a list of integers. One may specify any
+  additional dimensions that precede the final state size specification.
+ 
+  Args:
+    state_size: TensorShape or int that specifies the size of a tensor.
+    prefix: optional additional list of dimensions to prepend.
+ 
+  Returns:
+    result_state_size: list of dimensions the resulting tensor size.
+  """
+  result_state_size = tensor_shape.as_shape(state_size).as_list()
+  if prefix is not None:
+    if not isinstance(prefix, list):
+      raise TypeError("prefix of _state_size_with_prefix should be a list.")
+    result_state_size = prefix + result_state_size
+  return result_state_size
+
+def get_initial_cell_state(cell, initializer, batch_size, dtype):
+    """Return state tensor(s), initialized with initializer.
+    Initially described here: https://r2rt.com/non-zero-initial-states-for-recurrent-neural-networks.html
+    Args:
+      cell: RNNCell.
+      batch_size: int, float, or unit Tensor representing the batch size.
+      initializer: function with two arguments, shape and dtype, that
+          determines how the state is initialized.
+      dtype: the data type to use for the state.
+    Returns:
+      If `state_size` is an int or TensorShape, then the return value is a
+      `N-D` tensor of shape `[batch_size x state_size]` initialized
+      according to the initializer.
+      If `state_size` is a nested list or tuple, then the return value is
+      a nested list or tuple (of the same structure) of `2-D` tensors with
+    the shapes `[batch_size x s]` for each s in `state_size`.
+    """
+    state_size = cell.state_size
+    if nest.is_sequence(state_size):
+        state_size_flat = nest.flatten(state_size)
+        init_state_flat = [
+            initializer(_state_size_with_prefix(s), batch_size, dtype, i)
+                for i, s in enumerate(state_size_flat)]
+        init_state = nest.pack_sequence_as(structure=state_size,
+                                    flat_sequence=init_state_flat)
+    else:
+        init_state_size = _state_size_with_prefix(state_size)
+        init_state = initializer(init_state_size, batch_size, dtype, None)
+
+    return init_state
+
+def make_variable_state_initializer(**kwargs):
+    def variable_state_initializer(shape, batch_size, dtype, index):
+        args = kwargs.copy()
+
+        if args.get('name'):
+            args['name'] = args['name'] + '_' + str(index)
+        else:
+            args['name'] = 'init_state_' + str(index)
+
+        args['shape'] = shape
+        args['dtype'] = dtype
+
+        var = tf.get_variable(**args)
+        var = tf.expand_dims(var, 0)
+        var = tf.tile(var, tf.stack([batch_size] + [1] * len(shape)))
+        var.set_shape(_state_size_with_prefix(shape, prefix=[None]))
+        return var
+
+    return variable_state_initializer
+
 def lstm_cell(H, use_dropout=True):
     '''
     build lstm cell
@@ -41,7 +117,7 @@ def lstm_cell(H, use_dropout=True):
     def get_lstm(use_dropout=True):
         lstm = rnn_cell.BasicLSTMCell(H['lstm_size'], forget_bias=0.0, state_is_tuple=True)
         if use_dropout:
-            lstm = DropoutWrapper(lstm, input_keep_prob=0.5, output_keep_prob=0.5)
+            lstm = DropoutWrapper(ResidualWrapper(lstm), input_keep_prob=0.5, output_keep_prob=0.5)
         return lstm
 
     if H['num_lstm_layers'] > 1:
@@ -57,7 +133,10 @@ def build_lstm_inner(H, lstm_input, phase):
     '''
     lstm = lstm_cell(H, use_dropout = (phase == 'train'))
     batch_size = H['batch_size'] * H['grid_height'] * H['grid_width']
-    state = lstm.zero_state(batch_size, tf.float32)
+    if H['use_variable_state_initializer']:
+        state = get_initial_cell_state(lstm, make_variable_state_initializer(), batch_size, tf.float32)
+    else:
+        state = lstm.zero_state(batch_size, tf.float32)
 
     outputs = []
     with tf.variable_scope('RNN', initializer=tf.random_uniform_initializer(-0.1, 0.1)):
@@ -171,8 +250,8 @@ def build_forward(H, x, phase, reuse):
                      [H['batch_size'] * H['grid_width'] * H['grid_height'], H['later_feat_channels']])
     initializer = tf.random_uniform_initializer(-0.1, 0.1)
     with tf.variable_scope('decoder', reuse=reuse, initializer=initializer):
-        #scale_down = 0.01
-        lstm_input = tf.reshape(cnn, (H['batch_size'] * grid_size, H['later_feat_channels']))
+        scale_down = 0.01
+        lstm_input = tf.reshape(cnn * scale_down, (H['batch_size'] * grid_size, H['later_feat_channels']))
         if H['use_lstm']:
             lstm_outputs = build_lstm_inner(H, lstm_input, phase)
         else:
@@ -191,7 +270,7 @@ def build_forward(H, x, phase, reuse):
             conf_weights = tf.get_variable('conf_ip%d' % k,
                                            shape=(H['lstm_size'], H['num_classes']))
 
-            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights),
+            pred_boxes_step = tf.reshape(tf.matmul(output, box_weights) * 50,
                                          [outer_size, 1, 4])
             pred_confs_step = tf.reshape(tf.matmul(output, conf_weights),
                                          [outer_size, 1, H['num_classes']])
@@ -216,6 +295,8 @@ def build_forward(H, x, phase, reuse):
             num_offsets = len(w_offsets) * len(h_offsets)
             #import ipdb; ipdb.set_trace()
             rezoom_features = rezoom(H, pred_boxes, early_feat, early_feat_channels, w_offsets, h_offsets)
+            if phase == 'train':
+                rezoom_features = tf.nn.dropout(rezoom_features, 0.5)
             for k in range(H['rnn_len']):
                 delta_features = tf_concat(1, [lstm_outputs[k], rezoom_features[:, k, :]])
                 dim = 128
@@ -224,6 +305,8 @@ def build_forward(H, x, phase, reuse):
                                     shape=[H['lstm_size'] + early_feat_channels * num_offsets, dim])
                 # TODO: add dropout here ?
                 ip1 = tf.nn.relu(tf.matmul(delta_features, delta_weights1))
+                if phase == 'train':
+                    ip1 = tf.nn.dropout(ip1, 0.5)
                 delta_confs_weights = tf.get_variable(
                                     'delta_ip2%d' % k,
                                     shape=[dim, H['num_classes']])
@@ -231,7 +314,7 @@ def build_forward(H, x, phase, reuse):
                     delta_boxes_weights = tf.get_variable(
                                         'delta_ip_boxes%d' % k,
                                         shape=[dim, 4])
-                    pred_boxes_deltas.append(tf.reshape(tf.matmul(ip1, delta_boxes_weights),
+                    pred_boxes_deltas.append(tf.reshape(tf.matmul(ip1, delta_boxes_weights) * 50,
                                                         [outer_size, 1, 4]))
                 #scale = H.get('rezoom_conf_scale', 50)
                 pred_confs_deltas.append(tf.reshape(tf.matmul(ip1, delta_confs_weights),
@@ -239,9 +322,9 @@ def build_forward(H, x, phase, reuse):
             pred_confs_deltas = tf_concat(1, pred_confs_deltas)
             if H['reregress']:
                 pred_boxes_deltas = tf_concat(1, pred_boxes_deltas)
-            return pred_boxes, pred_logits, pred_confidences, pred_confs_deltas, pred_boxes_deltas
+            return pred_boxes, pred_logits, pred_confidences, pred_confs_deltas, pred_boxes_deltas, cnn, early_feat
 
-    return pred_boxes, pred_logits, pred_confidences
+    return pred_boxes, pred_logits, pred_confidences, cnn, early_feat
 
 def build_forward_backward(H, x, phase, boxes, flags):
     '''
@@ -252,9 +335,10 @@ def build_forward_backward(H, x, phase, boxes, flags):
     reuse = {'train': None, 'test': True}[phase]
     if H['use_rezoom']:
         (pred_boxes, pred_logits,
-         pred_confidences, pred_confs_deltas, pred_boxes_deltas) = build_forward(H, x, phase, reuse)
+         pred_confidences, pred_confs_deltas, pred_boxes_deltas,
+         cnn, early_feat) = build_forward(H, x, phase, reuse)
     else:
-        pred_boxes, pred_logits, pred_confidences = build_forward(H, x, phase, reuse)
+        pred_boxes, pred_logits, pred_confidences, cnn, early_feat = build_forward(H, x, phase, reuse)
     with tf.variable_scope('decoder', reuse={'train': None, 'test': True}[phase]):
         outer_boxes = tf.reshape(boxes, [outer_size, H['rnn_len'], 4])
         outer_flags = tf.cast(tf.reshape(flags, [outer_size, H['rnn_len']]), 'int32')
@@ -270,12 +354,19 @@ def build_forward_backward(H, x, phase, boxes, flags):
                                   [outer_size * H['rnn_len']])
         pred_logit_r = tf.reshape(pred_logits,
                                   [outer_size * H['rnn_len'], H['num_classes']])
-        confidences_loss = (tf.reduce_sum(
-            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=pred_logit_r, labels=true_classes))
-            ) / outer_size# * H['solver']['head_weights'][0]
+        if H['use_focal_loss']:
+            #import ipdb; ipdb.set_trace()
+            y = tf.nn.softmax(pred_logit_r)
+            y = tf.clip_by_value(y, 1e-7, 1 - 1e-7)
+            confidences_loss = tf.reduce_mean(-tf.reduce_sum((tf.ones_like(y) - y)**2 * tf.one_hot(true_classes, H['num_classes']) * tf.log(y), reduction_indices=[1]))
+        else:
+            confidences_loss = tf.reduce_mean(
+                tf.nn.sparse_softmax_cross_entropy_with_logits(logits=pred_logit_r, labels=true_classes)
+            )
+            # * H['solver']['head_weights'][0]
         residual = tf.reshape(perm_truth - pred_boxes * pred_mask,
                               [outer_size, H['rnn_len'], 4])
-        boxes_loss = tf.reduce_sum(tf.abs(residual)) / outer_size# * H['solver']['head_weights'][1]
+        boxes_loss = tf.reduce_mean(tf.abs(residual))# * H['alpha']# * H['solver']['head_weights'][1]
         if H['use_rezoom']:
             if H['rezoom_change_loss'] == 'center':
                 error = (perm_truth[:, :, 0:2] - pred_boxes[:, :, 0:2]) / tf.maximum(perm_truth[:, :, 2:4], 1.)
@@ -289,8 +380,14 @@ def build_forward_backward(H, x, phase, boxes, flags):
                 assert H['rezoom_change_loss'] == False
                 inside = tf.reshape(tf.to_int64((tf.greater(classes, 0))), [-1])
             new_confs = tf.reshape(pred_confs_deltas, [outer_size * H['rnn_len'], H['num_classes']])
-            delta_confs_loss = tf.reduce_sum(
-                tf.nn.sparse_softmax_cross_entropy_with_logits(logits=new_confs, labels=inside)) / outer_size# * H['solver']['head_weights'][0] * 0.1
+            if H['use_focal_loss']:
+                y = tf.nn.softmax(new_confs)
+                y = tf.clip_by_value(y, 1e-7, 1 - 1e-7)
+                delta_confs_loss = tf.reduce_mean(-tf.reduce_sum((tf.ones_like(y) - y)**2 * tf.one_hot(inside, H['num_classes']) * tf.log(y),reduction_indices=[1]))
+            else:
+                delta_confs_loss = tf.reduce_mean(
+                    tf.nn.sparse_softmax_cross_entropy_with_logits(logits=new_confs, labels=inside)
+                )
 
             pred_logits_squash = tf.reshape(new_confs,
                                             [outer_size * H['rnn_len'], H['num_classes']])
@@ -301,19 +398,18 @@ def build_forward_backward(H, x, phase, boxes, flags):
             if H['reregress']:
                 delta_residual = tf.reshape(perm_truth - (pred_boxes + pred_boxes_deltas) * pred_mask,
                                             [outer_size, H['rnn_len'], 4])
-                delta_boxes_loss = (tf.reduce_sum(tf.minimum(tf.square(delta_residual), 10. ** 2)) /
-                               outer_size * 0.03)#H['solver']['head_weights'][1] * 0.03)
-                boxes_loss = delta_boxes_loss
+                delta_boxes_loss = (tf.reduce_mean(tf.abs(delta_residual)))# * H['alpha']#H['solver']['head_weights'][1] * 0.03)
+                #boxes_loss = delta_boxes_loss
 
                 tf.summary.histogram(phase + '/delta_hist0_x', pred_boxes_deltas[:, 0, 0])
                 tf.summary.histogram(phase + '/delta_hist0_y', pred_boxes_deltas[:, 0, 1])
                 tf.summary.histogram(phase + '/delta_hist0_w', pred_boxes_deltas[:, 0, 2])
                 tf.summary.histogram(phase + '/delta_hist0_h', pred_boxes_deltas[:, 0, 3])
                 loss += delta_boxes_loss
+            return pred_boxes, pred_confidences, loss, confidences_loss, boxes_loss, delta_confs_loss, delta_boxes_loss, cnn, early_feat
         else:
             loss = confidences_loss + boxes_loss
-
-    return pred_boxes, pred_confidences, loss, confidences_loss, boxes_loss
+            return pred_boxes, pred_confidences, loss, confidences_loss, boxes_loss, cnn, early_feat
 
 def build(H, q):
     '''
@@ -341,7 +437,7 @@ def build(H, q):
         opt = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
     else:
         raise ValueError('Unrecognized opt type')
-    loss, accuracy, confidences_loss, boxes_loss = {}, {}, {}, {}
+    loss, accuracy, confidences_loss, boxes_loss, delta_confs_loss, delta_boxes_loss = {}, {}, {}, {}, {}, {}
     for phase in ['train', 'test']:
         # generate predictions and losses from forward pass
         x, confidences, boxes = q[phase].dequeue_many(arch['batch_size'])
@@ -349,10 +445,15 @@ def build(H, q):
 
 
         grid_size = H['grid_width'] * H['grid_height']
-
-        (pred_boxes, pred_confidences,
-         loss[phase], confidences_loss[phase],
-         boxes_loss[phase]) = build_forward_backward(H, x, phase, boxes, flags)
+        if H['use_rezoom']:
+            (pred_boxes, pred_confidences,
+            loss[phase], confidences_loss[phase],
+            boxes_loss[phase], delta_confs_loss[phase],
+            delta_boxes_loss[phase], cnn, early_feat) = build_forward_backward(H, x, phase, boxes, flags)
+        else:
+            (pred_boxes, pred_confidences,
+            loss[phase], confidences_loss[phase],
+            boxes_loss[phase], cnn, early_feat) = build_forward_backward(H, x, phase, boxes, flags)
         pred_confidences_r = tf.reshape(pred_confidences, [H['batch_size'], grid_size, H['rnn_len'], arch['num_classes']])
         pred_boxes_r = tf.reshape(pred_boxes, [H['batch_size'], grid_size, H['rnn_len'], 4])
 
@@ -372,20 +473,38 @@ def build(H, q):
             train_op = opt.apply_gradients(zip(grads, tvars), global_step=global_step)
         elif phase == 'test':
             moving_avg = tf.train.ExponentialMovingAverage(0.95)
-            smooth_op = moving_avg.apply([accuracy['train'], accuracy['test'],
+            if H['use_rezoom']:
+                smooth_op = moving_avg.apply([accuracy['train'], accuracy['test'],
+                                          loss['train'], loss['test'],
+                                          confidences_loss['train'], boxes_loss['train'],
+                                          confidences_loss['test'], boxes_loss['test'],
+                                          delta_confs_loss['train'], delta_boxes_loss['train'],
+                                          delta_confs_loss['test'], delta_boxes_loss['test']
+                                          ])
+            else:
+                smooth_op = moving_avg.apply([accuracy['train'], accuracy['test'],
+                                          loss['train'], loss['test'],
                                           confidences_loss['train'], boxes_loss['train'],
                                           confidences_loss['test'], boxes_loss['test'],
                                           ])
-
             for p in ['train', 'test']:
                 tf.summary.scalar('%s/accuracy' % p, accuracy[p])
                 tf.summary.scalar('%s/accuracy/smooth' % p, moving_avg.average(accuracy[p]))
+                tf.summary.scalar("%s/loss" % p, loss[p])
+                tf.summary.scalar("%s/loss/smooth" % p, moving_avg.average(loss[p]))
                 tf.summary.scalar("%s/confidences_loss" % p, confidences_loss[p])
                 tf.summary.scalar("%s/confidences_loss/smooth" % p,
                     moving_avg.average(confidences_loss[p]))
                 tf.summary.scalar("%s/regression_loss" % p, boxes_loss[p])
                 tf.summary.scalar("%s/regression_loss/smooth" % p,
                     moving_avg.average(boxes_loss[p]))
+                if H['use_rezoom']:
+                    tf.summary.scalar("%s/delta_confs_loss" % p, delta_confs_loss[p])
+                    tf.summary.scalar("%s/delta_confs_loss/smooth" % p,
+                        moving_avg.average(delta_confs_loss[p]))
+                    tf.summary.scalar("%s/delta_boxes_loss" % p, delta_boxes_loss[p])
+                    tf.summary.scalar("%s/delta_boxes_loss/smooth" % p,
+                        moving_avg.average(delta_boxes_loss[p]))
 
         if phase == 'test':
             test_image = x
@@ -420,7 +539,7 @@ def build(H, q):
     summary_op = tf.summary.merge_all()
 
     return (config, loss, accuracy, summary_op, train_op,
-            smooth_op, global_step, learning_rate)
+            smooth_op, global_step, learning_rate, cnn, early_feat)
 
 
 def train(H, test_images):
@@ -459,7 +578,7 @@ def train(H, test_images):
             sess.run(enqueue_op[phase], feed_dict=make_feed(d))
 
     (config, loss, accuracy, summary_op, train_op,
-     smooth_op, global_step, learning_rate) = build(H, q)
+     smooth_op, global_step, learning_rate, cnn, early_feat) = build(H, q)
 
     saver = tf.train.Saver(max_to_keep=None)
     writer = tf.summary.FileWriter(
@@ -500,6 +619,10 @@ def train(H, test_images):
                   #[x for x in tf.global_variables() if x.name.startswith('InceptionV1') and not H['solver']['opt'] in x.name])
             init_fn(sess)
 
+        if H['use_beholder']:
+            visualizer = Beholder(session=sess,
+                      logdir=H['save_dir'])
+
         # train model for N iterations
         start = time.time()
         max_iter = H['solver'].get('max_iter', 10000000)
@@ -518,10 +641,12 @@ def train(H, test_images):
                     dt = (time.time() - start) / (H['batch_size'] * display_iter)
                 start = time.time()
                 (train_loss, test_accuracy, summary_str,
-                    _, _) = sess.run([loss['train'], accuracy['test'],
-                                      summary_op, train_op, smooth_op,
+                    _, _, cnn_res, early_feat_res) = sess.run([loss['train'], accuracy['test'],
+                                      summary_op, train_op, smooth_op, cnn, early_feat
                                      ], feed_dict=lr_feed)
                 writer.add_summary(summary_str, global_step=global_step.eval())
+                if H['use_beholder']:
+                    visualizer.update(arrays=[cnn_res, early_feat_res])
                 print_str = string.join([
                     'Step: %d',
                     'lr: %f',

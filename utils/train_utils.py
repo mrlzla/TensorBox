@@ -79,6 +79,7 @@ def load_idl_tf(idlfile, H, jitter):
 
                 yield {"image": I, "boxes": boxes, "flags": flags}
             except:
+                print("File {} not found".format(anno.imageName))
                 pass
 
 def make_sparse(n, d):
@@ -159,13 +160,14 @@ def add_rectangles(H, orig_image, confidences, boxes, use_stitching=False, rnn_l
 
     rects = []
     for rect in acc_rects:
-        r = al.AnnoRect()
-        r.x1 = rect.cx - rect.width/2.
-        r.x2 = rect.cx + rect.width/2.
-        r.y1 = rect.cy - rect.height/2.
-        r.y2 = rect.cy + rect.height/2.
-        r.score = rect.true_confidence
-        rects.append(r)
+        if rect.confidence > min_conf:
+            r = al.AnnoRect()
+            r.x1 = rect.cx - rect.width/2.
+            r.x2 = rect.cx + rect.width/2.
+            r.y1 = rect.cy - rect.height/2.
+            r.y2 = rect.cy + rect.height/2.
+            r.score = rect.true_confidence
+            rects.append(r)
 
     return image, rects
 
