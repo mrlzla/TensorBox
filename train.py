@@ -109,6 +109,63 @@ def make_variable_state_initializer(**kwargs):
 
     return variable_state_initializer
 
+def focal_loss(labels, predictions, gamma=2, weights=1.0, epsilon=1e-7,
+                scope=None, loss_collection=ops.GraphKeys.LOSSES,
+                reduction=Reduction.SUM_BY_NONZERO_WEIGHTS):
+   """Adds a Focal Loss term to the training procedure.
+ 
+   For each value x in `predictions`, and the corresponding l in `labels`,
+   the following is calculated:
+ 
+   ```
+     pt = 1 - x                  if l == 0
+     pt = x                      if l == 1
+ 
+     focal_loss = -(1 - pt)**g * log(pt)
+   ```
+ 
+   where g is `gamma`.
+ 
+   See: https://arxiv.org/pdf/1708.02002.pdf
+ 
+   `weights` acts as a coefficient for the loss. If a scalar is provided, then
+   the loss is simply scaled by the given value. If `weights` is a tensor of size
+   [batch_size], then the total loss for each sample of the batch is rescaled
+   by the corresponding element in the `weights` vector. If the shape of
+   `weights` matches the shape of `predictions`, then the loss of each
+   measurable element of `predictions` is scaled by the corresponding value of
+   `weights`.
+ 
+   Args:
+     labels: The ground truth output tensor, same dimensions as 'predictions'.
+     predictions: The predicted outputs.
+     weights: Optional `Tensor` whose rank is either 0, or the same rank as
+       `labels`, and must be broadcastable to `labels` (i.e., all dimensions must
+       be either `1`, or the same as the corresponding `losses` dimension).
+     epsilon: A small increment to add to avoid taking a log of zero.
+     scope: The scope for the operations performed in computing the loss.
+     loss_collection: collection to which the loss will be added.
+     reduction: Type of reduction to apply to loss.
+ 
+   Returns:
+     Weighted loss float `Tensor`. If `reduction` is `NONE`, this has the same
+     shape as `labels`; otherwise, it is scalar.
+ 
+   Raises:
+     ValueError: If the shape of `predictions` doesn't match that of `labels` or
+       if the shape of `weights` is invalid.
+   """
+   with ops.name_scope(scope, "focal_loss",
+                       (predictions, labels, weights)) as scope:
+     predictions = math_ops.to_float(predictions)
+     labels = math_ops.to_float(labels)
+     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
+     preds = array_ops.where(
+         math_ops.equal(labels, 1), predictions, 1. - predictions)
+     losses = -(1. - preds)**gamma * math_ops.log(preds + epsilon)
+     return compute_weighted_loss(
+         losses, weights, scope, loss_collection, reduction=reduction)
+
 def lstm_cell(H, use_dropout=True):
     '''
     build lstm cell
@@ -250,8 +307,8 @@ def build_forward(H, x, phase, reuse):
                      [H['batch_size'] * H['grid_width'] * H['grid_height'], H['later_feat_channels']])
     initializer = tf.random_uniform_initializer(-0.1, 0.1)
     with tf.variable_scope('decoder', reuse=reuse, initializer=initializer):
-        scale_down = 0.01
-        lstm_input = tf.reshape(cnn * scale_down, (H['batch_size'] * grid_size, H['later_feat_channels']))
+        #scale_down = 0.01
+        lstm_input = tf.reshape(cnn, (H['batch_size'] * grid_size, H['later_feat_channels']))
         if H['use_lstm']:
             lstm_outputs = build_lstm_inner(H, lstm_input, phase)
         else:
@@ -298,7 +355,7 @@ def build_forward(H, x, phase, reuse):
             if phase == 'train':
                 rezoom_features = tf.nn.dropout(rezoom_features, 0.5)
             for k in range(H['rnn_len']):
-                delta_features = tf_concat(1, [lstm_outputs[k], rezoom_features[:, k, :]])
+                delta_features = tf_concat(1, [lstm_outputs[k], rezoom_features[:, k, :] / 1000.0])
                 dim = 128
                 delta_weights1 = tf.get_variable(
                                     'delta_ip1%d' % k,
@@ -314,10 +371,10 @@ def build_forward(H, x, phase, reuse):
                     delta_boxes_weights = tf.get_variable(
                                         'delta_ip_boxes%d' % k,
                                         shape=[dim, 4])
-                    pred_boxes_deltas.append(tf.reshape(tf.matmul(ip1, delta_boxes_weights) * 50,
+                    pred_boxes_deltas.append(tf.reshape(tf.matmul(ip1, delta_boxes_weights) * 5,
                                                         [outer_size, 1, 4]))
-                #scale = H.get('rezoom_conf_scale', 50)
-                pred_confs_deltas.append(tf.reshape(tf.matmul(ip1, delta_confs_weights),
+                scale = H.get('rezoom_conf_scale', 50)
+                pred_confs_deltas.append(tf.reshape(tf.matmul(ip1, delta_confs_weights) * scale,
                                                     [outer_size, 1, H['num_classes']]))
             pred_confs_deltas = tf_concat(1, pred_confs_deltas)
             if H['reregress']:
@@ -356,9 +413,7 @@ def build_forward_backward(H, x, phase, boxes, flags):
                                   [outer_size * H['rnn_len'], H['num_classes']])
         if H['use_focal_loss']:
             #import ipdb; ipdb.set_trace()
-            y = tf.nn.softmax(pred_logit_r)
-            y = tf.clip_by_value(y, 1e-7, 1 - 1e-7)
-            confidences_loss = tf.reduce_mean(-tf.reduce_sum((tf.ones_like(y) - y)**2 * tf.one_hot(true_classes, H['num_classes']) * tf.log(y), reduction_indices=[1]))
+            confidences_loss = focal_loss(pred_logit_r, tf.one_hot(true_classes, H['num_classes']))
         else:
             confidences_loss = tf.reduce_mean(
                 tf.nn.sparse_softmax_cross_entropy_with_logits(logits=pred_logit_r, labels=true_classes)
@@ -366,7 +421,7 @@ def build_forward_backward(H, x, phase, boxes, flags):
             # * H['solver']['head_weights'][0]
         residual = tf.reshape(perm_truth - pred_boxes * pred_mask,
                               [outer_size, H['rnn_len'], 4])
-        boxes_loss = tf.reduce_mean(tf.abs(residual))# * H['alpha']# * H['solver']['head_weights'][1]
+        boxes_loss = tf.reduce_mean(tf.abs(residual)) * 0.1# * H['alpha']# * H['solver']['head_weights'][1]
         if H['use_rezoom']:
             if H['rezoom_change_loss'] == 'center':
                 error = (perm_truth[:, :, 0:2] - pred_boxes[:, :, 0:2]) / tf.maximum(perm_truth[:, :, 2:4], 1.)
@@ -381,13 +436,11 @@ def build_forward_backward(H, x, phase, boxes, flags):
                 inside = tf.reshape(tf.to_int64((tf.greater(classes, 0))), [-1])
             new_confs = tf.reshape(pred_confs_deltas, [outer_size * H['rnn_len'], H['num_classes']])
             if H['use_focal_loss']:
-                y = tf.nn.softmax(new_confs)
-                y = tf.clip_by_value(y, 1e-7, 1 - 1e-7)
-                delta_confs_loss = tf.reduce_mean(-tf.reduce_sum((tf.ones_like(y) - y)**2 * tf.one_hot(inside, H['num_classes']) * tf.log(y),reduction_indices=[1]))
+                delta_confs_loss = focal_loss(pred_logit_r, tf.one_hot(true_classes, H['num_classes']))   
             else:
                 delta_confs_loss = tf.reduce_mean(
                     tf.nn.sparse_softmax_cross_entropy_with_logits(logits=new_confs, labels=inside)
-                )
+                ) * 0.1
 
             pred_logits_squash = tf.reshape(new_confs,
                                             [outer_size * H['rnn_len'], H['num_classes']])
@@ -398,10 +451,10 @@ def build_forward_backward(H, x, phase, boxes, flags):
             if H['reregress']:
                 delta_residual = tf.reshape(perm_truth - (pred_boxes + pred_boxes_deltas) * pred_mask,
                                             [outer_size, H['rnn_len'], 4])
-                delta_boxes_loss = (tf.reduce_mean(tf.abs(delta_residual)))# * H['alpha']#H['solver']['head_weights'][1] * 0.03)
+                delta_boxes_loss = (tf.reduce_mean(tf.square(delta_residual))) * 0.1 * 0.03 # * H['alpha']#H['solver']['head_weights'][1] * 0.03)
                 #boxes_loss = delta_boxes_loss
 
-                tf.summary.histogram(phase + '/delta_hist0_x', pred_boxes_deltas[:, 0, 0])
+                tf.summary.histogram(phase + ' ', pred_boxes_deltas[:, 0, 0])
                 tf.summary.histogram(phase + '/delta_hist0_y', pred_boxes_deltas[:, 0, 1])
                 tf.summary.histogram(phase + '/delta_hist0_w', pred_boxes_deltas[:, 0, 2])
                 tf.summary.histogram(phase + '/delta_hist0_h', pred_boxes_deltas[:, 0, 3])

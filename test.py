@@ -2,10 +2,12 @@ import tensorflow as tf
 import os
 import json
 import subprocess
+import numpy as np
 from scipy.misc import imread, imresize
 from scipy import misc
  
 from train import build_forward
+from classifier import Classifier, normalize_coords
 from utils.annolist import AnnotationLib as al
 from utils.train_utils import add_rectangles, rescale_boxes
 from tensorflow.python.tools import freeze_graph
@@ -47,7 +49,7 @@ def get_results(args, H, data_dir):
         graph = load_frozen_graph(args.graphfile)
     else:
         new_saver = tf.train.import_meta_graph(args.graphfile)
-    NUM_THREADS = 1
+    NUM_THREADS = 8
     with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS),
             graph=graph if args.frozen_graph else None) as sess:
         sess.run(tf.global_variables_initializer())
@@ -98,6 +100,28 @@ def get_results(args, H, data_dir):
     return pred_annolist
 
 
+
+def misis_forward(annos):
+    def sort_fn(x):
+        return x.filename()
+    annos = list(sorted(annos, key=sort_fn))
+    res = np.zeros(len(annos))
+    for i, anno in enumerate(annos):
+        import ipdb; ipdb.set_trace()
+        img = imread(anno.filename())
+        for rect in anno.rects:
+            x1 = int(rect.x1)
+            y1 = int(rect.y1)
+            x2 = int(rect.x2)
+            y2 = int(rect.y2)
+            ans = img[y1:y2, x1:x2]
+            if ans:
+                res[i] = 1
+                break
+        res[i] = 0
+    ans = np.where(res == 1)
+    return ans if ans >= 0 else -1 
+
 def video_results(args, H, filepath):
     tf.reset_default_graph()
     if args.frozen_graph:
@@ -105,6 +129,8 @@ def video_results(args, H, filepath):
     else:
         new_saver = tf.train.import_meta_graph(args.graphfile)
     NUM_THREADS = 8
+    classifier_weights = 'output_classifier/classifier_2017_08_09_14.14/save.ckpt-7001'
+    classifier = Classifier((256, 256), 2, classifier_weights)
     with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS),
             graph=graph if args.frozen_graph else None) as sess:
         sess.run(tf.global_variables_initializer())
@@ -123,8 +149,8 @@ def video_results(args, H, filepath):
             #cap = cv2.VideoCapture("./IMG_2764.MOV")
         
             #print "Wait for the header"
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        out = cv2.VideoWriter('output.avi',fourcc, 20.0, (640,480))
+        #fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+        #out = cv2.VideoWriter('output.avi',fourcc, 20, (640,480))
         while(cap.isOpened()):
             ret, frame = cap.read()
             if not ret:
@@ -133,11 +159,17 @@ def video_results(args, H, filepath):
             feed = {x_in: img}
             start_time = time()
             (np_pred_boxes, np_pred_confidences) = sess.run([pred_boxes, pred_confidences], feed_dict=feed)
-            time_2 = time()
             new_img, rects = add_rectangles(H, [img], np_pred_confidences, np_pred_boxes,
                                 use_stitching=True, rnn_len=H['rnn_len'], min_conf=args.min_conf, tau=args.tau, show_suppressed=args.show_suppressed)
-            print(time() - start_time)
-            out.write(new_img)
+            for rect in rects:
+                x1, y1, x2, y2 = normalize_coords(rect.x1, rect.y1, rect.x2, rect.y2, H["image_width"], H["image_height"])
+                logits = classifier.run(imresize(img[y1:y2, x1:x2], (256, 256)))
+                index = np.argmax(logits)
+                cv2.putText(new_img, str(index), (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 1,(0,255,0),2)
+            time_2 = time()
+            print(time_2 - start_time)
+            #out.write(new_img)
+            cv2.imshow('frame',new_img)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         cap.release()
@@ -166,3 +198,4 @@ if __name__ == '__main__':
     video_results(args, H, os.path.dirname(args.datadir))
 
     #pred_annolist = get_results(args, H, os.path.dirname(args.datadir))
+    #misis_forward(pred_annolist)
